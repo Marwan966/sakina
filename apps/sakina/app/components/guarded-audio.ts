@@ -15,7 +15,7 @@ const MAX_SEGMENT_MS = 2000;
 const PLAYOUT_DELAY_SECONDS = 2.8;
 
 export function hasTranscriptCoverage(
-  parts: { start: number; end: number }[],
+  parts: { start: number; end: number; text?: string }[],
   start: number,
   end: number,
 ) {
@@ -36,7 +36,25 @@ export function hasTranscriptCoverage(
     if (part.start - coveredTo > 1200) return false;
     coveredTo = Math.max(coveredTo, part.end);
   }
-  return coveredTo >= end - 800;
+  if (coveredTo >= end - 800) return true;
+  // A spoken verse number can span several Arabic words even when the
+  // provider represents it as a short digit token. Allow only this explicit
+  // reference tail another 400 ms; lead/middle gaps and Quran review remain
+  // unchanged. This uses source intervals, never packet arrival time.
+  if (
+    coveredTo < end - 1200 ||
+    parts.some((part) => typeof part.text !== "string")
+  )
+    return false;
+  const text = parts
+    .map((part) => part.text)
+    .join("")
+    .normalize("NFKC")
+    .replace(/[\p{M}\u0640]/gu, "")
+    .replace(/[أإآٱ]/g, "ا");
+  return /(?:^|\s)(?:الاية|الايه|اية|ايه)(?:\s+رقم)?\s+[0-9٠-٩]{1,3}[\s.،,؛;:؟?!…]*$/u.test(
+    text,
+  );
 }
 
 /** Original PCM and transcript share the provider's session clock. Never use
