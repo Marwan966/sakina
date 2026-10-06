@@ -101,6 +101,7 @@ export type VoiceToolState = {
   proactiveSuppressed?: boolean;
   suppressedAtRevision?: number;
   inputRevision?: number;
+  selectionReviewedRevision?: number;
   sessionExpiresAt?: number;
   lastRecommendation?: {
     proposalId: string | null;
@@ -333,7 +334,7 @@ export async function executeQuranSearch(
       concepts: parsed.data.concepts,
       references: parsed.data.references,
       excludeSurahs,
-      limit: 5,
+      limit: 6,
     });
   } catch {
     return {
@@ -769,6 +770,16 @@ export function executeLiveTool(
       };
     }
     if (parsed.data.fit !== "supported") {
+      const reviewed = state.searchSnapshot;
+      if (
+        reviewed?.inputRevision === revision &&
+        reviewed.id === parsed.data.searchId &&
+        revision === state.inputRevision &&
+        reviewed.candidates.some(
+          (candidate) => candidate.id === parsed.data.candidateId,
+        )
+      )
+        state.selectionReviewedRevision = revision;
       return {
         status: parsed.data.fit === "unsupported" ? "unavailable" : "clarify",
         message:
@@ -1190,8 +1201,9 @@ export async function handleLiveSession(
         !state.proactiveSuppressed &&
         !state.proposal &&
         !state.lastRecommendation &&
-        !state.searchSnapshot &&
-        !state.searchGeneration &&
+        (!state.searchGeneration ||
+          state.searchSnapshot?.inputRevision === inputRevision) &&
+        state.selectionReviewedRevision !== inputRevision &&
         activeDelegations.size === 0 &&
         searchingResponses.size === 0 &&
         pending.size === 0,

@@ -75,8 +75,7 @@ export async function semanticQuranKeys(
 ): Promise<string[]> {
   const apiKey = options.apiKey ?? process.env.OPENAI_API_KEY;
   const databaseUrl = options.databaseUrl ?? process.env.SUPABASE_URL;
-  const internalKey =
-    options.internalKey ?? process.env.INTERNAL_API_TOKEN;
+  const internalKey = options.internalKey ?? process.env.INTERNAL_API_TOKEN;
   if (
     !apiKey ||
     !databaseUrl ||
@@ -95,9 +94,9 @@ export async function semanticQuranKeys(
   const take = Number.isFinite(limit)
     ? Math.max(1, Math.min(12, Math.trunc(limit)))
     : 12;
-  // One three-second budget covers embedding plus database lookup. Lexical
+  // One six-second budget covers embedding plus database lookup. Lexical
   // retrieval runs alongside it; no retry delays the live conversation.
-  const signal = AbortSignal.timeout(3000);
+  const signal = AbortSignal.timeout(6000);
   try {
     const response = await fetcher("https://api.openai.com/v1/embeddings", {
       method: "POST",
@@ -120,7 +119,10 @@ export async function semanticQuranKeys(
       `${databaseUrl.replace(/\/$/, "")}/functions/v1/quran-search`,
       {
         method: "POST",
-        headers: { "X-Internal-Key": internalKey, "Content-Type": "application/json" },
+        headers: {
+          "X-Internal-Key": internalKey,
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           kind: "semantic",
           query_embedding: embedding,

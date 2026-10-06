@@ -1960,6 +1960,361 @@ test("a newer native delegation supersedes manual tools carrying the captured co
   }
 });
 
+test("native search without a selection decision recovers once using its cached candidates", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  const journey = await progressJourney();
+  const { provider } = journey;
+  const kickoffs = () =>
+    provider.sent.filter(
+      (event) =>
+        event.type === "response.item.create" &&
+        event.item?.role === "developer" &&
+        event.item?.content === CONVERSATION_PROGRESS_INSTRUCTION,
+    );
+  try {
+    provider.receive({
+      type: "session.delegation.created",
+      delegation: { id: completedOwner },
+    });
+    completeTool(
+      provider,
+      completedOwner,
+      "native-cached-search",
+      "search_quran",
+      {
+        query: "ضغط العمل وكثرة المسؤوليات",
+        concepts: ["حدود الطاقة البشرية", "التيسير ورفع الحرج"],
+        references: ["94:5-6"],
+        safety: "ordinary",
+      },
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const initialSearch = toolResult(provider, "native-cached-search");
+    assert.equal(initialSearch.status, "candidates");
+    assert.equal(journey.sourceLookups(), 1);
+    completeNativeReply(
+      provider,
+      completedOwner,
+      "أفهم أن العمل والمسؤوليات يثقلان عليك؛ تفضّل، أنا أستمع إليك.",
+      "native-unreviewed-final",
+    );
+    t.mock.timers.tick(9_999);
+    assert.equal(kickoffs().length, 0);
+    t.mock.timers.tick(1);
+    assert.equal(kickoffs().length, 1);
+
+    shapedManualSearch(provider, "completed-owner", "recovery-cached-search");
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const cachedSearch = toolResult(provider, "recovery-cached-search");
+    assert.equal(cachedSearch.status, "candidates");
+    assert.equal(cachedSearch.searchId, initialSearch.searchId);
+    assert.deepEqual(cachedSearch.candidates, initialSearch.candidates);
+    assert.equal(
+      journey.sourceLookups(),
+      1,
+      "recovery must reuse the current source evidence without a second lookup",
+    );
+    const preparationId = "recovery-cached-prepare";
+    shapedManualResponse(provider, "completed-owner", {
+      type: "response.created",
+      response: { id: preparationId },
+    });
+    shapedManualResponse(provider, "completed-owner", {
+      type: "response.output_item.done",
+      item: {
+        type: "function_call",
+        call_id: preparationId,
+        name: "prepare_relevant_recitation",
+        arguments: JSON.stringify({
+          intent: "overwhelmed",
+          fit: "supported",
+          safety: "ordinary",
+          userConcern: "تراكم العمل يرهقني ولا أجد وقتًا للراحة",
+          searchId: cachedSearch.searchId,
+          candidateId: candidate.id,
+          connection:
+            "معنى اليسر بعد العسر يتصل مباشرة بشعوره أن ضغط المسؤوليات يطول",
+        }),
+      },
+    });
+    shapedManualResponse(provider, "completed-owner", {
+      type: "response.completed",
+      response: { id: preparationId },
+    });
+    await Promise.resolve();
+    const prepared = toolResult(provider, preparationId);
+    assert.equal(prepared.status, "proposed");
+    assert.equal(prepared.recitationId, recitation.id);
+    shapedManualResponse(provider, "completed-owner", {
+      type: "response.created",
+      response: { id: "recovery-cached-final" },
+    });
+    shapedManualResponse(provider, "completed-owner", {
+      type: "response.completed",
+      response: { id: "recovery-cached-final" },
+    });
+    const requestsBefore = journey.requestCount();
+    t.mock.timers.tick(20_000);
+    assert.equal(kickoffs().length, 1);
+    assert.equal(journey.sourceLookups(), 1);
+    assert.equal(journey.requestCount(), requestsBefore);
+  } finally {
+    assert.doesNotMatch(await journey.close(), /"type":"recitation"/);
+  }
+});
+
+for (const fit of ["unsupported", "uncertain"] as const) {
+  test(`a valid native ${fit} selection decision prevents automatic recovery`, async (t) => {
+    t.mock.timers.enable({
+      apis: ["Date", "setTimeout", "setInterval"],
+      now: 1_800_000_000_000,
+    });
+    const journey = await progressJourney();
+    const { provider } = journey;
+    try {
+      provider.receive({
+        type: "session.delegation.created",
+        delegation: { id: completedOwner },
+      });
+      completeTool(
+        provider,
+        completedOwner,
+        `native-${fit}-search`,
+        "search_quran",
+        {
+          query: "ضغط العمل وكثرة المسؤوليات",
+          concepts: ["حدود الطاقة البشرية", "التيسير ورفع الحرج"],
+          references: ["94:5-6"],
+          safety: "ordinary",
+        },
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      const searched = toolResult(provider, `native-${fit}-search`);
+      assert.equal(searched.status, "candidates");
+      completeTool(
+        provider,
+        completedOwner,
+        `native-${fit}-prepare`,
+        "prepare_relevant_recitation",
+        {
+          intent: "overwhelmed",
+          fit,
+          safety: "ordinary",
+          userConcern: "تراكم العمل يرهقني ولا أجد وقتًا للراحة",
+          searchId: searched.searchId,
+          candidateId: candidate.id,
+          connection:
+            "لا تكفي المعلومات المتاحة لتأكيد صلة واضحة بتفصيل المستخدم الحالي",
+        },
+      );
+      await Promise.resolve();
+      assert.equal(
+        toolResult(provider, `native-${fit}-prepare`).status,
+        fit === "unsupported" ? "unavailable" : "clarify",
+      );
+      completeNativeReply(
+        provider,
+        completedOwner,
+        undefined,
+        `native-${fit}-final`,
+      );
+      const requestsBefore = journey.requestCount();
+      t.mock.timers.tick(20_000);
+      assert.equal(journey.sourceLookups(), 1);
+      assert.equal(journey.requestCount(), requestsBefore);
+      assert.equal(
+        provider.sent.filter(
+          (event) =>
+            event.type === "response.item.create" &&
+            event.item?.role === "developer" &&
+            event.item?.content === CONVERSATION_PROGRESS_INSTRUCTION,
+        ).length,
+        0,
+        "a reviewed decision to abstain or clarify must not trigger another automatic selection",
+      );
+    } finally {
+      assert.doesNotMatch(await journey.close(), /"type":"recitation"/);
+    }
+  });
+}
+
+test("a failed native source lookup without a snapshot does not trigger automatic recovery", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  const provider = new FakeProvider();
+  let sourceLookups = 0;
+  const response = await handleLiveSession(request(), {
+    ...dependencies(provider, { durationSeconds: 240 }),
+    search: async () => {
+      sourceLookups++;
+      return { status: "unavailable" as const, candidates: [] };
+    },
+  });
+  const output = response.text();
+  try {
+    provider.receive({
+      type: "session.input_transcript.delta",
+      delta: "تراكم العمل يرهقني ولا أجد وقتًا للراحة بعد كثرة المسؤوليات",
+    });
+    provider.receive({
+      type: "session.output_transcript.delta",
+      delta:
+        "أفهم أنك تواجه ضغطًا متواصلًا من مسؤوليات العمل وأنك تحتاج إلى مساحة من الراحة والإنصات الهادئ لما تمر به في هذه الفترة.",
+    });
+    provider.receive({
+      type: "session.delegation.created",
+      delegation: { id: completedOwner },
+    });
+    completeTool(
+      provider,
+      completedOwner,
+      "native-unavailable-search",
+      "search_quran",
+      {
+        query: "ضغط العمل وكثرة المسؤوليات",
+        concepts: ["حدود الطاقة البشرية", "التيسير ورفع الحرج"],
+        references: ["94:5-6"],
+        safety: "ordinary",
+      },
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(
+      toolResult(provider, "native-unavailable-search").status,
+      "unavailable",
+    );
+    completeNativeReply(
+      provider,
+      completedOwner,
+      undefined,
+      "native-unavailable-final",
+    );
+    const requestsBefore = provider.sent.filter(
+      (event) => event.type === "response.create",
+    ).length;
+    t.mock.timers.tick(20_000);
+    assert.equal(sourceLookups, 1);
+    assert.equal(
+      provider.sent.filter((event) => event.type === "response.create").length,
+      requestsBefore,
+    );
+    assert.equal(
+      provider.sent.filter(
+        (event) =>
+          event.type === "response.item.create" &&
+          event.item?.role === "developer",
+      ).length,
+      0,
+    );
+  } finally {
+    provider.receive({ type: "session.closed", reason: "close_requested" });
+  }
+  assert.doesNotMatch(await output, /"type":"recitation"/);
+});
+
+test("an abstention without matching source evidence cannot suppress the recovery watchdog", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  for (const fit of ["unsupported", "uncertain"] as const) {
+    for (const variant of [
+      "missing-snapshot",
+      "wrong-search",
+      "wrong-candidate",
+    ] as const) {
+      const journey = await progressJourney();
+      const { provider } = journey;
+      try {
+        provider.receive({
+          type: "session.delegation.created",
+          delegation: { id: completedOwner },
+        });
+        let searchId = "nonexistent-search";
+        if (variant !== "missing-snapshot") {
+          completeTool(
+            provider,
+            completedOwner,
+            "native-invalid-review-search",
+            "search_quran",
+            {
+              query: "ضغط العمل وكثرة المسؤوليات",
+              concepts: ["حدود الطاقة البشرية", "التيسير ورفع الحرج"],
+              references: ["94:5-6"],
+              safety: "ordinary",
+            },
+          );
+          await Promise.resolve();
+          await Promise.resolve();
+          await Promise.resolve();
+          const searched = toolResult(provider, "native-invalid-review-search");
+          assert.equal(searched.status, "candidates");
+          searchId = searched.searchId;
+        }
+        completeTool(
+          provider,
+          completedOwner,
+          "native-invalid-review-prepare",
+          "prepare_relevant_recitation",
+          {
+            intent: "overwhelmed",
+            fit,
+            safety: "ordinary",
+            userConcern: "تراكم العمل يرهقني ولا أجد وقتًا للراحة",
+            searchId: variant === "wrong-search" ? "wrong-search-id" : searchId,
+            candidateId:
+              variant === "wrong-candidate"
+                ? "wrong-candidate-id"
+                : candidate.id,
+            connection:
+              "لا تكفي المعلومات المتاحة لتأكيد صلة واضحة بتفصيل المستخدم الحالي",
+          },
+        );
+        await Promise.resolve();
+        assert.notEqual(
+          toolResult(provider, "native-invalid-review-prepare").status,
+          "proposed",
+        );
+        completeNativeReply(
+          provider,
+          completedOwner,
+          undefined,
+          "native-invalid-review-final",
+        );
+        t.mock.timers.tick(10_000);
+        assert.equal(
+          provider.sent.filter(
+            (event) =>
+              event.type === "response.item.create" &&
+              event.item?.role === "developer" &&
+              event.item?.content === CONVERSATION_PROGRESS_INSTRUCTION,
+          ).length,
+          1,
+          `${fit}: ${variant}`,
+        );
+        assert.equal(
+          journey.sourceLookups(),
+          variant === "missing-snapshot" ? 0 : 1,
+        );
+      } finally {
+        assert.doesNotMatch(await journey.close(), /"type":"recitation"/);
+      }
+    }
+  }
+});
+
 test("failed or incomplete manual responses cannot execute further tools under any supported envelope", async (t) => {
   t.mock.timers.enable({
     apis: ["Date", "setTimeout", "setInterval"],

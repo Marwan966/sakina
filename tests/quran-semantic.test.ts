@@ -191,14 +191,55 @@ test("provider and database errors return a safe lexical fallback signal", async
     );
 });
 
-test("semantic lookup has one three-second total deadline and does not retry the caller query", async () => {
+test("semantic lookup allows a two-second embedding followed by a slower database match", async () => {
+  const signals: Array<AbortSignal | null | undefined> = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    const embedding = String(input) === "https://api.openai.com/v1/embeddings";
+    const signal = init?.signal;
+    signals.push(signal);
+    await new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      const abort = () => {
+        clearTimeout(delay);
+        reject(signal?.reason);
+      };
+      const delay = setTimeout(
+        () => {
+          signal?.removeEventListener("abort", abort);
+          resolve();
+        },
+        embedding ? 2000 : 1500,
+      );
+      signal?.addEventListener("abort", abort, { once: true });
+    });
+    return Response.json(
+      embedding
+        ? embeddingResponse()
+        : [{ verse_key: "94:5", similarity: 0.9 }],
+    );
+  };
+  const started = Date.now();
+  assert.deepEqual(
+    await semanticQuranKeys("ضغط العمل", [], 12, { ...options, fetcher }),
+    ["94:5"],
+  );
+  assert.equal(signals.length, 2);
+  assert.equal(signals[0], signals[1]);
+  assert.ok(signals[0] instanceof AbortSignal);
+  assert.ok(Date.now() - started >= 3400);
+});
+
+test("semantic lookup has one six-second total deadline and does not retry the caller query", async () => {
   let calls = 0;
   const fetcher: typeof fetch = async (_input, init) => {
     calls++;
     return new Promise((_resolve, reject) => {
       const keepAlive = setTimeout(
         () => reject(new Error("test_deadline_missing")),
-        4500,
+        7500,
       );
       init?.signal?.addEventListener(
         "abort",
@@ -216,8 +257,8 @@ test("semantic lookup has one three-second total deadline and does not retry the
     [],
   );
   assert.equal(calls, 1);
-  assert.ok(Date.now() - started >= 2900);
-  assert.ok(Date.now() - started < 4300);
+  assert.ok(Date.now() - started >= 5900);
+  assert.ok(Date.now() - started < 7300);
 });
 
 async function withConfiguration(work: () => Promise<void>) {
