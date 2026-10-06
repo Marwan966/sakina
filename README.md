@@ -1,21 +1,27 @@
 # سَكينة · Sakina
 
-Arabic live voice support with source-grounded Quran listening. The public page needs no account: speak, hear a brief contextual response, then choose whether to listen to an original Yasser Al-Dosari recording. The assistant never substitutes its own voice for Quran recitation.
+تجربة صوتية عربية مباشرة، مع استماع إلى القرآن من مصدر موثّق. الصفحة العامة لا تحتاج حساباً: تتحدث، فتسمع ردّاً قصيراً يناسب حالك، ثم تختار أن تستمع إلى تلاوة أصلية بصوت الشيخ ياسر الدوسري. والمساعد لا يضع صوته مكان التلاوة أبداً.
 
-Sakina offers emotional and spiritual support, not psychotherapy, diagnosis, fatwas or emergency care. Model relevance and voice quality are fallible.
+«سَكينة» تقدّم مؤانسة ودعماً معنوياً، لا علاجاً نفسياً ولا تشخيصاً ولا فتوى ولا استجابة لحالات الطوارئ. ودقة النموذج وجودة الصوت ليستا مضمونتين.
 
-## What is included
+## تشغيل التجربة
 
-- The independent Next.js frontend and server, live audio lifecycle, interruption recovery, consent and duplicate-playback controls.
-- All **114 chapters / 6,236 exact licensed Quran verses**, original recording URLs and publisher verse timings.
-- **6,236 existing 1,024-dimensional embeddings**, compressed into 98 checked shards (~28 MB). Restoring them makes no paid embedding request.
-- Supabase schema, protected Edge functions, database admission limits, tests and CI.
+تُفتح التجربة من متصفح **Chrome** أو **Edge** على الحاسوب، أو **Chrome** على أندرويد.
 
-The repository contains no deployed credentials, caller conversations, audio captures, database key rows, or history from the earlier combined project. Recitation audio remains on MP3Quran; tafsir is retrieved on demand and is not distributed as a dataset.
+**قيد معروف:** لا تعمل التجربة الصوتية حالياً على متصفح **Safari في iPhone**، لاختلاف تعامله مع تشغيل الصوت وإذن الميكروفون. وهذا قيد موثّق لم نجد له حلاً مستقراً خلال مدة التحدي، ونعمل عليه بعد التسليم.
 
-## Local setup
+## ما الذي يتضمنه المستودع
 
-Use Node.js **22** and npm. From the repository root:
+- الواجهة والخادم (Next.js) مستقلَّين، ودورة حياة الصوت المباشر، واستعادة الجلسة بعد المقاطعة، وضوابط الإذن ومنع التشغيل المكرر.
+- **114 سورة و6,236 آية** بنصها المرخَّص كاملاً، وروابط التلاوات الأصلية وتوقيتات الآيات من الناشر.
+- **6,236 متّجهاً (embeddings) بأبعاد 1,024**، مضغوطة في 98 شريحة مفحوصة (نحو 28 ميجابايت). واستعادتها لا تستدعي أي طلب تضمين مدفوع.
+- مخطط Supabase، والدوال الطرفية المحميّة، وحدود القبول في قاعدة البيانات، والاختبارات، والتكامل المستمر (CI).
+
+ولا يحتوي المستودع على أي بيانات اعتماد منشورة، ولا محادثات متصلين، ولا تسجيلات صوتية، ولا صفوف مفاتيح في قاعدة البيانات، ولا أي أثر من المشروع المشترك السابق. وتبقى التلاوات على MP3Quran، ويُجلب التفسير عند الطلب ولا يُوزَّع كمجموعة بيانات.
+
+## التشغيل محلياً
+
+استعمل Node.js **22** وnpm. من جذر المستودع:
 
 ```sh
 npm ci
@@ -24,11 +30,15 @@ npm run dataset:verify
 npm run dev
 ```
 
-Open http://localhost:3000. The page and offline tests work without API keys. Live calls require your own configured services; `OPENAI_LIVE_ENABLED` defaults to `false`. Do not paste credentials into issues, source code, screenshots or chat.
+ثم افتح http://localhost:3000
 
-See [deployment and database setup](docs/SETUP.md), [dataset provenance and licensing](dataset/README.md), [architecture and operations](docs/ARCHITECTURE.md), and [security policy](SECURITY.md).
+الصفحة والاختبارات غير المتصلة تعمل بلا أي مفاتيح. أما المكالمات المباشرة فتحتاج خدماتك المهيّأة، و`OPENAI_LIVE_ENABLED` قيمته الافتراضية `false`.
 
-## Verification
+**لا تضع بيانات الاعتماد في التذاكر ولا في الكود ولا في لقطات الشاشة ولا في المحادثات.**
+
+للمزيد: [النشر وإعداد قاعدة البيانات](docs/SETUP.md) · [مصدر البيانات وترخيصها](dataset/README.md) · [المعمار والتشغيل](docs/ARCHITECTURE.md) · [سياسة الأمان](SECURITY.md) · [مصادر التلاوات](docs/VOICE-SOURCES.md)
+
+## التحقق
 
 ```sh
 npm run dataset:verify
@@ -40,8 +50,12 @@ npm run security:check
 npm audit --omit=dev
 ```
 
-`security:check` scans Git-tracked files, including decompressed dataset shards. CI also scans Git history with Gitleaks and tests schema/data restoration on an empty PostgreSQL database. Browser regressions use controlled transports; they do not rate the model's voice or prove physical iPhone behavior. Actual-provider testing requires configured credentials and incurs API usage.
+يفحص `security:check` الملفات المتتبَّعة في Git، ومنها شرائح البيانات بعد فكّ ضغطها. ويفحص التكامل المستمر تاريخ Git كاملاً بـGitleaks، ويختبر استعادة المخطط والبيانات على قاعدة PostgreSQL فارغة.
 
-## Data and code rights
+واختبارات المتصفح تستعمل ناقلات محكومة: فهي لا تقيس جودة صوت النموذج، ولا تثبت سلوك المنتج على جهاز iPhone حقيقي. واختبار المزوّد الفعلي يحتاج بيانات اعتماد مهيّأة ويستهلك من حصة الـAPI.
 
-The [Tanzil notice](dataset/LICENSE-TANZIL.txt) applies to the verbatim Quran text and its derived dataset. [Third-party notices](THIRD_PARTY_NOTICES.md) explain the other sources. Public visibility alone does not grant a general reuse license for the application code; no MIT/Apache license has been applied on the owner's behalf.
+## الحقوق والتراخيص
+
+ينطبق [إشعار Tanzil](dataset/LICENSE-TANZIL.txt) على نص القرآن الحرفي وعلى مجموعة البيانات المشتقة منه. وتشرح [إشعارات الأطراف الثالثة](THIRD_PARTY_NOTICES.md) بقية المصادر.
+
+وكون المستودع عاماً لا يمنح وحده ترخيصاً عاماً لإعادة استعمال كود التطبيق، ولم يُطبَّق أي ترخيص MIT أو Apache نيابةً عن المالك.
