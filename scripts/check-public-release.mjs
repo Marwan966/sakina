@@ -4,6 +4,12 @@ import {gunzipSync} from 'node:zlib';
 const git=(...args)=>execFileSync('git',args,{maxBuffer:8*1024*1024}).toString('utf8');
 const files=git('ls-files','-z').split('\0').filter(Boolean);
 const findings=[];
+// Lockfiles generated alongside an existing node_modules tree can omit other
+// platforms' optional compiler packages. Require deploy and contributor targets.
+const locked=JSON.parse(readFileSync('package-lock.json','utf8')).packages;
+for(const name of ['@typescript/typescript-linux-x64','@typescript/typescript-win32-x64','@typescript/typescript-darwin-arm64','@next/swc-linux-x64-gnu','@esbuild/linux-x64']){
+ if(!locked[`node_modules/${name}`])findings.push({file:'package-lock.json',rule:`missing-platform:${name}`});
+}
 const patterns=[
  ['openai-key',/\bsk-(?:proj-|svcacct-)[A-Za-z0-9_-]{30,}/],
  ['github-token',/\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})/],
