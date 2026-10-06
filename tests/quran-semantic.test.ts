@@ -105,7 +105,7 @@ test("query embeddings remain ephemeral and only real nonexcluded corpus keys su
     const url = String(input),
       body = JSON.parse(String(init?.body));
     calls.push({ url, body, signal: init?.signal });
-    if (url.includes("openai.com")) {
+    if (url === "https://api.openai.com/v1/embeddings") {
       assert.equal(
         new Headers(init?.headers).get("Authorization"),
         "Bearer unit-test-server-key",
@@ -181,7 +181,7 @@ test("provider and database errors return a safe lexical fallback signal", async
   const limited: typeof fetch = async () =>
     new Response("busy", { status: 429 });
   const badDb: typeof fetch = async (url) =>
-    String(url).includes("openai.com")
+    String(url) === "https://api.openai.com/v1/embeddings"
       ? Response.json(embeddingResponse())
       : new Response("offline", { status: 503 });
   for (const fetcher of [unavailable, limited, badDb])
@@ -240,7 +240,12 @@ async function withConfiguration(work: () => Promise<void>) {
   }
 }
 function sourceTafsir(url: string) {
-  const key = url.split("/").at(-1)!;
+  const match =
+    /^https:\/\/api\.quran\.com\/api\/v4\/tafsirs\/16\/by_ayah\/(\d{1,3}:\d{1,3})$/.exec(
+      url,
+    );
+  assert.ok(match, "Unexpected tafsir request target");
+  const key = match[1];
   return Response.json({
     tafsir: {
       resource_id: 16,
@@ -259,17 +264,23 @@ test("search starts lexical and semantic work together, then ranks explicit refe
     });
     const fetcher: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.includes("openai.com")) {
+      if (url === "https://api.openai.com/v1/embeddings") {
         embeddingStarted = true;
         await lexicalStarted;
         return Response.json(embeddingResponse());
       }
-      if ((url.includes("/functions/v1/quran-search") && JSON.parse(String(init?.body)).kind === "lexical")) {
+      if (
+        url === "https://database.test/functions/v1/quran-search" &&
+        JSON.parse(String(init?.body)).kind === "lexical"
+      ) {
         assert.equal(embeddingStarted, true);
         startedLexical();
         return Response.json([{ verse_key: "12:86" }]);
       }
-      if ((url.includes("/functions/v1/quran-search") && JSON.parse(String(init?.body)).kind === "semantic"))
+      if (
+        url === "https://database.test/functions/v1/quran-search" &&
+        JSON.parse(String(init?.body)).kind === "semantic"
+      )
         return Response.json([
           { verse_key: "94:5", similarity: 0.9 },
           { verse_key: "94:6", similarity: 0.85 },
@@ -296,9 +307,12 @@ test("semantic outages keep lexical search working and missing tafsir still bloc
   await withConfiguration(async () => {
     const fallback: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.includes("openai.com"))
+      if (url === "https://api.openai.com/v1/embeddings")
         return new Response("busy", { status: 503 });
-      if ((url.includes("/functions/v1/quran-search") && JSON.parse(String(init?.body)).kind === "lexical"))
+      if (
+        url === "https://database.test/functions/v1/quran-search" &&
+        JSON.parse(String(init?.body)).kind === "lexical"
+      )
         return Response.json([{ verse_key: "12:86" }]);
       return sourceTafsir(url);
     };
@@ -312,10 +326,18 @@ test("semantic outages keep lexical search working and missing tafsir still bloc
     );
     const withoutProof: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.includes("openai.com")) return Response.json(embeddingResponse());
-      if ((url.includes("/functions/v1/quran-search") && JSON.parse(String(init?.body)).kind === "semantic"))
+      if (url === "https://api.openai.com/v1/embeddings")
+        return Response.json(embeddingResponse());
+      if (
+        url === "https://database.test/functions/v1/quran-search" &&
+        JSON.parse(String(init?.body)).kind === "semantic"
+      )
         return Response.json([{ verse_key: "94:5", similarity: 0.9 }]);
-      if ((url.includes("/functions/v1/quran-search") && JSON.parse(String(init?.body)).kind === "lexical")) return Response.json([]);
+      if (
+        url === "https://database.test/functions/v1/quran-search" &&
+        JSON.parse(String(init?.body)).kind === "lexical"
+      )
+        return Response.json([]);
       return new Response("unavailable", { status: 503 });
     };
     assert.deepEqual(
@@ -333,15 +355,21 @@ test("planned concepts replace raw personal wording in both semantic and databas
     let lexical: string[] = [];
     const fetcher: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.includes("openai.com")) {
+      if (url === "https://api.openai.com/v1/embeddings") {
         embedded = JSON.parse(String(init?.body)).input;
         return Response.json(embeddingResponse());
       }
-      if ((url.includes("/functions/v1/quran-search") && JSON.parse(String(init?.body)).kind === "lexical")) {
+      if (
+        url === "https://database.test/functions/v1/quran-search" &&
+        JSON.parse(String(init?.body)).kind === "lexical"
+      ) {
         lexical = JSON.parse(String(init?.body)).terms;
         return Response.json([{ verse_key: "12:86" }]);
       }
-      if ((url.includes("/functions/v1/quran-search") && JSON.parse(String(init?.body)).kind === "semantic"))
+      if (
+        url === "https://database.test/functions/v1/quran-search" &&
+        JSON.parse(String(init?.body)).kind === "semantic"
+      )
         return Response.json([{ verse_key: "94:5", similarity: 0.9 }]);
       return sourceTafsir(url);
     };

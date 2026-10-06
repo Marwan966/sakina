@@ -6,6 +6,7 @@ import {
   rankQuranVerses,
 } from "./quran-corpus";
 import { semanticQuranKeys } from "./quran-semantic";
+import { sourcePlainText } from "./source-text";
 
 export type QuranSearchCandidate = {
   id: string;
@@ -31,19 +32,6 @@ export type QuranSearchResult = {
   status: "ok" | "unavailable";
 };
 const cache = new Map<string, { text: string; url: string; expires: number }>();
-function plainText(html: string) {
-  return html
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
-    .replace(/<[^>]*>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 async function tafsir(key: string, fetcher: typeof fetch) {
   const existing = cache.get(key);
   if (fetcher === fetch && existing && existing.expires > Date.now())
@@ -64,7 +52,7 @@ async function tafsir(key: string, fetcher: typeof fetch) {
       t.text.length > 30000
     )
       return undefined;
-    const text = plainText(t.text);
+    const text = sourcePlainText(t.text);
     if (text.length < 20) return undefined;
     const result = { text, url, expires: Date.now() + 3600_000 };
     // Runtime lookup only; no bulk-imported tafsir or persistent offline copy.
