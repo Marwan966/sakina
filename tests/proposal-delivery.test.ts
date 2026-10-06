@@ -9,6 +9,7 @@ import {
   hasMeaningfulPcm16,
   proposalDeliveryCommentary,
 } from "../apps/sakina/lib/proposal-delivery";
+import { CONVERSATION_PROGRESS_INSTRUCTION } from "../apps/sakina/lib/conversation-progress";
 
 const previousEnvironment = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
@@ -496,4 +497,441 @@ test("a Quran quotation in the model connection is never copied into authored sp
   assert.match(content, /البقرة ٢٨٦/);
   assert.match(content, /هل نبدأ الاستماع/);
   assert.doesNotMatch(content, /لا يكلف الله نفسا الا وسعها/);
+});
+
+test("live toolchain remembers two fragmented recall turns and dispatches the original recording only after fresh valid consent", async () => {
+  const journey = await createAcceptedProposal();
+  const { provider, response, proposal } = journey;
+  const output = response.text();
+  completeNativeReply(
+    provider,
+    journey.delegationId,
+    "أقترح مقطعًا من سورة الشرح، هل نبدأ الاستماع؟",
+  );
+  const expected = {
+    proposalId: proposal.proposalId,
+    recitationId: recitation.id,
+    title: recitation.title,
+    reference: recitation.reference,
+    chapterName: "الشرح",
+    reciter: recitation.reciter,
+    intent: "overwhelmed",
+    userConcern: "تراكم العمل يرهقني ولا أجد وقتًا للراحة",
+    connection:
+      "معنى اليسر بعد العسر يتصل مباشرة بشعوره أن ضغط المسؤوليات يطول",
+    state: "awaiting_consent",
+  };
+  let timestamp = 3_500;
+  const caller = (delta: string) => {
+    provider.receive({
+      type: "session.input_transcript.delta",
+      delta,
+      start_ms: timestamp,
+      end_ms: timestamp + 250,
+    });
+    timestamp += 300;
+  };
+  const begin = (id: string) =>
+    provider.receive({
+      type: "session.delegation.created",
+      delegation: { id },
+    });
+  const assertMemory = (result: Record<string, any>) => {
+    for (const [field, value] of Object.entries(expected))
+      assert.equal(result.recommendation?.[field], value, field);
+  };
+  const canonicalThoughts = () =>
+    provider.sent.filter(
+      (event) =>
+        event.type === "session.thinking.append" &&
+        event.content.includes(recitation.title) &&
+        event.content.includes(recitation.reference) &&
+        event.content.includes("awaiting_consent"),
+    );
+  try {
+    assert.equal(
+      canonicalThoughts().length,
+      1,
+      "the accepted proposal reaches the live model's factual context",
+    );
+    for (const [index, fragments] of [
+      ["أي ", "سورة اقترحتها؟"],
+      ["ذكّرني ", "مرة أخرى باسم السورة والآيات"],
+    ].entries()) {
+      const id = `recall-${index}`;
+      caller(fragments[0]);
+      begin(id);
+      // The final fragment arrives after delegation. Read-only recall must still
+      // return current memory without confusing the question with new consent.
+      caller(fragments[1]);
+      completeTool(provider, id, id, "get_session_recitation", {});
+      await wait();
+      const result = toolResult(provider, id);
+      assert.equal(result.status, "remembered");
+      assertMemory(result);
+      assert.equal(canonicalThoughts().length, index + 2);
+    }
+
+    caller("نعم أريد سماع المقطع نفسه");
+    begin("wrong-confirmation");
+    const consent = {
+      intent: "overwhelmed",
+      consent: true,
+      safety: "ordinary",
+      requestedId: null,
+      proposalId: proposal.proposalId,
+      contextStillApplies: true,
+    };
+    completeTool(
+      provider,
+      "wrong-confirmation",
+      "wrong-confirmation",
+      "recommend_recitation",
+      {
+        ...consent,
+        proposalId: "unrelated-proposal",
+      },
+    );
+    await wait();
+    const rejected = toolResult(provider, "wrong-confirmation");
+    assert.notEqual(rejected.status, "ready");
+    assertMemory(rejected);
+    completeTool(
+      provider,
+      "wrong-confirmation",
+      "recall-after-rejection",
+      "get_session_recitation",
+      {},
+    );
+    await wait();
+    assertMemory(toolResult(provider, "recall-after-rejection"));
+
+    caller("نعم، ");
+    caller("شغّل المقطع المقترح الآن");
+    begin("fresh-consent");
+    completeTool(
+      provider,
+      "fresh-consent",
+      "fresh-consent",
+      "recommend_recitation",
+      consent,
+    );
+    await wait();
+    const ready = toolResult(provider, "fresh-consent");
+    assert.equal(ready.status, "ready");
+    assert.equal(ready.recitationId, recitation.id);
+    completeTool(
+      provider,
+      "fresh-consent",
+      "duplicate-consent",
+      "recommend_recitation",
+      consent,
+    );
+    await wait();
+    assert.equal(
+      toolResult(provider, "duplicate-consent").status,
+      "already_executed",
+    );
+    assert.equal(
+      commentary(provider).length,
+      0,
+      "recall must not restart the unsolicited initial invitation",
+    );
+
+    provider.receive({ type: "session.closed", reason: "close_requested" });
+    const events = (await output)
+      .split("\n\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)));
+    const playbacks = events.filter((event) => event.type === "recitation");
+    assert.equal(playbacks.length, 1);
+    assert.equal(playbacks[0].playbackId, ready.playbackId);
+    assert.deepEqual(playbacks[0].recitation, recitation);
+    const consentIndex = events.findIndex(
+      (event) =>
+        event.type === "transcript" &&
+        event.delta === "شغّل المقطع المقترح الآن",
+    );
+    const playbackIndex = events.findIndex(
+      (event) => event.type === "recitation",
+    );
+    assert.ok(
+      consentIndex >= 0 && playbackIndex > consentIndex,
+      "no recording is dispatched during recall or rejected confirmation",
+    );
+  } finally {
+    if (provider.readyState !== WebSocket.CLOSED)
+      provider.receive({ type: "session.closed", reason: "close_requested" });
+    await output;
+  }
+});
+
+test("live transcript wiring sends one conditional progress reminder while native delegation cancels it", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  for (const nativeDelegation of [false, true]) {
+    const provider = new FakeProvider();
+    const response = await handleLiveSession(
+      request(),
+      dependencies(provider, { durationSeconds: 240 }),
+    );
+    const output = response.text();
+    const reminders = () =>
+      provider.sent.filter(
+        (event) =>
+          event.type === "session.instructions.append" &&
+          event.content === CONVERSATION_PROGRESS_INSTRUCTION,
+      );
+    try {
+      provider.receive({
+        type: "session.input_transcript.delta",
+        delta: "تراكم العمل يرهقني ولا أجد وقتًا للراحة بعد كثرة المسؤوليات",
+        start_ms: 0,
+        end_ms: 1_000,
+      });
+      provider.receive({
+        type: "session.output_transcript.delta",
+        delta:
+          "أفهم أنك تواجه ضغطًا متواصلًا من مسؤوليات العمل وأنك تحتاج إلى مساحة من الراحة والإنصات الهادئ لما تمر به في هذه الفترة.",
+        start_ms: 1_000,
+        end_ms: 4_000,
+      });
+      t.mock.timers.tick(9_999);
+      assert.equal(reminders().length, 0);
+      if (nativeDelegation)
+        provider.receive({
+          type: "session.delegation.created",
+          delegation: { id: "native-search" },
+        });
+      t.mock.timers.tick(1);
+      assert.equal(reminders().length, nativeDelegation ? 0 : 1);
+      provider.receive({
+        type: "session.output_transcript.delta",
+        delta:
+          "يمكنك أن تواصل حديثك بهدوء، وسأحاول فهم التفصيل الذي تريد مشاركته دون استعجال.",
+        start_ms: 12_000,
+        end_ms: 14_000,
+      });
+      t.mock.timers.tick(10_000);
+      assert.equal(
+        reminders().length,
+        nativeDelegation ? 0 : 1,
+        "the reminder is optional and cannot loop",
+      );
+      assert.equal(
+        provider.sent.filter((event) => event.type === "response.create")
+          .length,
+        0,
+        "the progress hint does not itself select or play a recording",
+      );
+    } finally {
+      provider.receive({ type: "session.closed", reason: "close_requested" });
+    }
+    const streamed = await output;
+    assert.doesNotMatch(streamed, /"type":"recitation"/);
+  }
+});
+
+test("caller fragments and assistant filler cannot steer an active backend delegation before its terminal event", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  for (const terminal of [
+    "response.completed",
+    "response.failed",
+    "response.incomplete",
+  ]) {
+    const provider = new FakeProvider();
+    const response = await handleLiveSession(
+      request(),
+      dependencies(provider, { durationSeconds: 240 }),
+    );
+    const output = response.text();
+    const reminders = () =>
+      provider.sent.filter(
+        (event) =>
+          event.type === "session.instructions.append" &&
+          event.content === CONVERSATION_PROGRESS_INSTRUCTION,
+      );
+    const exchange = () => {
+      provider.receive({
+        type: "session.input_transcript.delta",
+        delta: "وأريد أن أوضح أن المسؤوليات تتراكم كل يوم ولا أجد وقتًا لنفسي",
+      });
+      provider.receive({
+        type: "session.output_transcript.delta",
+        delta:
+          "أفهم أنك تواجه ضغطًا متواصلًا من مسؤوليات العمل وأنك تحتاج إلى مساحة من الراحة والإنصات الهادئ لما تمر به في هذه الفترة.",
+      });
+    };
+    try {
+      provider.receive({
+        type: "session.delegation.created",
+        delegation: { id: "active-lookup" },
+      });
+      nested(provider, "active-lookup", {
+        type: "response.created",
+        response: { id: "active-response" },
+      });
+      exchange();
+      t.mock.timers.tick(10_000);
+      assert.equal(
+        reminders().length,
+        0,
+        `${terminal}: ongoing delegation must remain ineligible after new caller speech`,
+      );
+      nested(provider, "active-lookup", {
+        type: terminal,
+        response: { id: "active-response" },
+      });
+      exchange();
+      t.mock.timers.tick(10_000);
+      assert.equal(
+        reminders().length,
+        1,
+        `${terminal}: a later fresh exchange can progress once the backend finished`,
+      );
+    } finally {
+      provider.receive({ type: "session.closed", reason: "close_requested" });
+      await output;
+    }
+  }
+});
+
+test("rejection of the optional progress instruction neither resets audio nor emits an error or retry", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  const provider = new FakeProvider();
+  const response = await handleLiveSession(
+    request(),
+    dependencies(provider, { durationSeconds: 240 }),
+  );
+  const output = response.text();
+  const reminders = () =>
+    provider.sent.filter(
+      (event) =>
+        event.type === "session.instructions.append" &&
+        event.content === CONVERSATION_PROGRESS_INSTRUCTION,
+    );
+  try {
+    provider.receive({
+      type: "session.input_transcript.delta",
+      delta: "تراكم العمل يرهقني ولا أجد وقتًا للراحة بعد كثرة المسؤوليات",
+    });
+    provider.receive({
+      type: "session.output_transcript.delta",
+      delta:
+        "أفهم أنك تواجه ضغطًا متواصلًا من مسؤوليات العمل وأنك تحتاج إلى مساحة من الراحة والإنصات الهادئ لما تمر به في هذه الفترة.",
+    });
+    t.mock.timers.tick(10_000);
+    const authored = reminders();
+    assert.equal(authored.length, 1);
+    provider.receive({
+      type: "error",
+      error: {
+        code: "optional_instruction_rejected",
+        client_event_id: authored[0].event_id,
+      },
+    });
+    provider.receive({
+      type: "session.input_transcript.delta",
+      delta: "دعني أكمل حديثي، ما زلت أرغب في وصف ما حدث اليوم",
+    });
+    provider.receive({
+      type: "session.output_transcript.delta",
+      delta: "تفضّل، أنا أسمعك ويمكنك أن تأخذ وقتك في وصف ما حدث اليوم بهدوء.",
+    });
+    t.mock.timers.tick(10_000);
+    assert.equal(reminders().length, 1);
+    assert.equal(provider.readyState, WebSocket.OPEN);
+  } finally {
+    provider.receive({ type: "session.closed", reason: "close_requested" });
+  }
+  const streamed = await output;
+  assert.doesNotMatch(streamed, /"type":"(?:error|recitation)"/);
+  const resets = streamed
+    .split("\n\n")
+    .filter((line) => line.startsWith("data: "))
+    .map((line) => JSON.parse(line.slice(6)))
+    .filter((event) => event.type === "audio_reset");
+  assert.deepEqual(resets, [{ type: "audio_reset", reason: "closed" }]);
+  assert.match(streamed, /دعني أكمل حديثي/);
+  assert.match(streamed, /تفضّل، أنا أسمعك/);
+});
+
+test("a superseded response failure cannot release progress steering while its replacement is active", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  for (const staleTerminal of ["response.failed", "response.incomplete"]) {
+    const provider = new FakeProvider();
+    const response = await handleLiveSession(
+      request(),
+      dependencies(provider, { durationSeconds: 240 }),
+    );
+    const output = response.text();
+    const reminders = () =>
+      provider.sent.filter(
+        (event) =>
+          event.type === "session.instructions.append" &&
+          event.content === CONVERSATION_PROGRESS_INSTRUCTION,
+      );
+    const exchange = () => {
+      provider.receive({
+        type: "session.input_transcript.delta",
+        delta: "وأريد أن أوضح أن المسؤوليات تتراكم كل يوم ولا أجد وقتًا لنفسي",
+      });
+      provider.receive({
+        type: "session.output_transcript.delta",
+        delta:
+          "أفهم أنك تواجه ضغطًا متواصلًا من مسؤوليات العمل وأنك تحتاج إلى مساحة من الراحة والإنصات الهادئ لما تمر به في هذه الفترة.",
+      });
+    };
+    try {
+      provider.receive({
+        type: "session.delegation.created",
+        delegation: { id: "replaced-lookup" },
+      });
+      nested(provider, "replaced-lookup", {
+        type: "response.created",
+        response: { id: "old-response" },
+      });
+      nested(provider, "replaced-lookup", {
+        type: "response.created",
+        response: { id: "current-response" },
+      });
+      nested(provider, "replaced-lookup", {
+        type: staleTerminal,
+        response: { id: "old-response" },
+      });
+      exchange();
+      t.mock.timers.tick(10_000);
+      assert.equal(
+        reminders().length,
+        0,
+        `${staleTerminal}: the old terminal event cannot mark the replacement idle`,
+      );
+      nested(provider, "replaced-lookup", {
+        type: "response.completed",
+        response: { id: "current-response" },
+      });
+      exchange();
+      t.mock.timers.tick(10_000);
+      assert.equal(
+        reminders().length,
+        1,
+        `${staleTerminal}: only the current response terminal releases the delegation`,
+      );
+    } finally {
+      provider.receive({ type: "session.closed", reason: "close_requested" });
+    }
+    const streamed = await output;
+    assert.doesNotMatch(streamed, /"type":"(?:error|recitation)"/);
+  }
 });

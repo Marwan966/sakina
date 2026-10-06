@@ -506,7 +506,7 @@ test("tools demand present consent and safety instead of inventing scripture", (
   };
   assert.equal(
     executeLiveTool(call, state, (e) => events.push(e)).status,
-    "declined",
+    "awaiting_consent",
   );
   assert.equal(events.length, 0);
   call.arguments = JSON.stringify({
@@ -646,7 +646,8 @@ test("thematic playback fails closed without a held proposal or with changed, ex
       variant,
     );
     assert.equal(events.length, 0, variant);
-    assert.equal(state.proposal, undefined, variant);
+    // Rejected authorization cannot erase the canonical selection.
+    assert.equal(Boolean(state.proposal), variant !== "missing", variant);
   }
 });
 
@@ -679,9 +680,9 @@ test("refusal and topic change cancel proposals; a later stale confirmation cann
   assert.equal(
     executeLiveTool(confirmation(state, { consent: false }), state, () => {})
       .status,
-    "declined",
+    "awaiting_consent",
   );
-  assert.equal(state.proposal, undefined);
+  assert.ok(state.proposal);
 });
 
 test("explicit refusal or listen-only preference blocks later proactive lookup even without an existing proposal", () => {
@@ -740,7 +741,7 @@ test("context change and missing playback consent do not invent an explicit refu
   assert.equal(
     executeLiveTool(confirmation(state, { consent: false }), state, () => {})
       .status,
-    "declined",
+    "awaiting_consent",
   );
   assert.equal(state.proactiveSuppressed, undefined);
   assert.equal(prepareProposal(state).status, "proposed");

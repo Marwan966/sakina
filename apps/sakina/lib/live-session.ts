@@ -31,6 +31,7 @@ import {
   type ProposalDeliverySnapshot,
 } from "./proposal-delivery";
 import { reserveVoiceBudget } from "./voice-budget";
+import { ConversationProgressController } from "./conversation-progress";
 
 export const sessionRequestSchema = z
   .object({
@@ -97,6 +98,15 @@ export type VoiceToolState = {
   proactiveSuppressed?: boolean;
   suppressedAtRevision?: number;
   inputRevision?: number;
+  sessionExpiresAt?: number;
+  lastRecommendation?: {
+    proposalId: string | null;
+    recitation: Recitation;
+    intent: (typeof RECITATION_INTENTS)[number];
+    userConcern: string;
+    connection?: string;
+    state: "playback_requested" | "dismissed" | "support";
+  };
   // True for every real session. Optional only for the historical synchronous helper contract.
   requireGroundedSelection?: boolean;
   inputFragments?: { revision: number; text: string }[];
@@ -139,6 +149,59 @@ export type VoiceToolState = {
     connection?: string;
   };
 };
+
+/** Short-lived application facts, never a model-generated replacement for the selection. */
+export function sessionRecitationMemory(state: VoiceToolState) {
+  const proposal = state.proposal;
+  const previous = state.lastRecommendation;
+  const recitation = proposal?.recitation ?? previous?.recitation;
+  if (!recitation) return null;
+  return {
+    proposalId: proposal?.id ?? previous?.proposalId ?? null,
+    recitationId: recitation.id,
+    title: recitation.title,
+    reference: recitation.reference,
+    chapterName: quranChapter(recitation.surah)?.name,
+    reciter: recitation.reciter,
+    intent: proposal?.intent ?? previous?.intent,
+    userConcern: proposal?.userConcern ?? previous?.userConcern,
+    connection: proposal?.connection ?? previous?.connection,
+    state:
+      state.urgent || state.supportRequired
+        ? "support"
+        : proposal
+          ? proposal.expiresAt <= Date.now()
+            ? "expired"
+            : "awaiting_consent"
+          : previous!.state,
+    expiresAt: proposal?.expiresAt,
+  };
+}
+
+function rememberProposal(
+  state: VoiceToolState,
+  status: "playback_requested" | "dismissed" | "support",
+) {
+  const proposal = state.proposal;
+  if (proposal?.recitation)
+    state.lastRecommendation = {
+      proposalId: proposal.id,
+      recitation: proposal.recitation,
+      intent: proposal.intent,
+      userConcern: proposal.userConcern,
+      connection: proposal.connection,
+      state: status,
+    };
+}
+
+function pendingProposalResult(state: VoiceToolState) {
+  return {
+    status: "awaiting_consent",
+    recommendation: sessionRecitationMemory(state),
+    message:
+      "هذا هو المقترح المحفوظ نفسه. أجب عن سؤال الاسم أو الصلة بهذه البيانات فقط دون بحث أو استبدال. السؤال عن السورة ليس موافقة؛ إن وافق على الاستماع استخدم معرّف المقترح المحفوظ والسياق نفسه.",
+  };
+}
 
 export type VoiceEvent = { type: string; [key: string]: unknown };
 type PendingCall = {
@@ -244,12 +307,7 @@ export async function executeQuranSearch(
         "عولج هذا الكلام بالفعل. تابع الإنصات دون بحث أو عرض أو تشغيل متكرر.",
     };
   }
-  if (state.proposal)
-    return {
-      status: "awaiting_consent",
-      message:
-        "يوجد مقترح قائم؛ لا تبحث مجددًا قبل اختيار المستخدم أو تغيير الموضوع.",
-    };
+  if (state.proposal) return pendingProposalResult(state);
   if (state.searchSnapshot?.inputRevision === revision)
     return {
       status: "candidates",
@@ -580,6 +638,7 @@ export function executeLiveTool(
 ) {
   if (state.closed) return { status: "closed", actionExecuted: false };
   const humanSupport = (urgent: boolean) => {
+    rememberProposal(state, "support");
     delete state.proposal;
     invalidateQuranSearch(state);
     state.urgent = urgent || state.urgent;
@@ -609,6 +668,23 @@ export function executeLiveTool(
   } catch {
     return { status: "invalid", message: "اطلب توضيحًا من المستخدم." };
   }
+  if (call.name === "get_session_recitation") {
+    if (!z.object({}).strict().safeParse(raw).success)
+      return { status: "invalid" };
+    const recommendation = sessionRecitationMemory(state);
+    return recommendation
+      ? {
+          status: "remembered",
+          recommendation,
+          message:
+            "هذه ذاكرة الجلسة المعتمدة. أجب بالاسم والمرجع نفسيهما دون إعادة البحث أو اقتباس القرآن. playback_requested تعني إرسال التسجيل للمشغّل فقط، وليس إثبات سماعه. لا تعِد التشغيل لمجرد سؤال أو نعم بعد تشغيل سابق. المقترح المنتهي أو المرفوض لا يمنح إذنًا.",
+        }
+      : {
+          status: "empty",
+          message:
+            "لم يُحفظ مقترح موثق بعد. لا تخترع اسم سورة؛ إذا اكتمل وصف الموقف العادي فابدأ البحث الموثق الآن.",
+        };
+  }
   if (call.name === "report_support_need") {
     const parsed = z
       .object({ urgency: z.enum(["immediate", "clarify"]) })
@@ -623,6 +699,7 @@ export function executeLiveTool(
       .strict()
       .safeParse(raw);
     if (!parsed.success) return { status: "invalid" };
+    rememberProposal(state, "dismissed");
     delete state.proposal;
     invalidateQuranSearch(state);
     if (parsed.data.reason === "declined") {
@@ -664,11 +741,7 @@ export function executeLiveTool(
       };
     }
     if (state.requireGroundedSelection && state.proposal) {
-      return {
-        status: "awaiting_consent",
-        message:
-          "يوجد مقترح قائم؛ انتظر اختيار المستخدم دون إعادة العرض أو استبداله.",
-      };
+      return pendingProposalResult(state);
     }
     // A replacement lookup invalidates a previously proposed recording, even if it fails.
     delete state.proposal;
@@ -750,7 +823,8 @@ export function executeLiveTool(
       intent: parsed.data.intent,
       userConcern: parsed.data.userConcern,
       inputRevision: call.inputRevision ?? state.inputRevision ?? 0,
-      expiresAt: Date.now() + 90_000,
+      expiresAt:
+        state.sessionExpiresAt ?? Date.now() + LIVE_DURATION_SECONDS * 1000,
       recitation: result.recitation,
       connection: parsed.data.connection ?? undefined,
     };
@@ -787,11 +861,11 @@ export function executeLiveTool(
     return { ...support, status: "safety" };
   }
   if (!parsed.data.consent) {
-    delete state.proposal;
     return {
-      status: "declined",
+      status: "awaiting_consent",
+      recommendation: sessionRecitationMemory(state),
       message:
-        "تابع الإنصات؛ لم تُشغّل تلاوة وأُلغي المقترح. لا تضغط على المستخدم للموافقة.",
+        "لم تُشغّل تلاوة. عدم وجود موافقة ليس رفضًا ولا سببًا لتغيير المقترح؛ أجب عن سؤاله من الذاكرة. إذا رفض فعلًا فاستخدم dismiss_recitation_proposal وسجّل رغبته.",
     };
   }
   const revision = call.inputRevision ?? state.inputRevision ?? 0;
@@ -826,6 +900,32 @@ export function executeLiveTool(
   let requestedId = parsed.data.requestedId;
   let heldRecitation: Recitation | undefined;
   if (parsed.data.intent === "explicit_request") {
+    const named = requestedId ? getRecitation(requestedId) : undefined;
+    const repeated =
+      named &&
+      state.playedRanges?.some(
+        (entry) =>
+          entry.surah === named.surah &&
+          entry.start <= named.ayahEnd &&
+          entry.end >= named.ayahStart,
+      );
+    if (
+      state.requireGroundedSelection &&
+      (!named ||
+        !freshNamedEvidence(
+          state,
+          named,
+          parsed.data.requestEvidence,
+          !!repeated,
+        ))
+    ) {
+      return {
+        status: "request_required",
+        recommendation: sessionRecitationMemory(state),
+        message:
+          "لم يثبت طلب سماع هذا التسجيل بالاسم؛ لم يتغير المقترح المحفوظ. سؤال ما السورة أو تذكيري بها ليس تشغيلًا. استرجع الذاكرة، وللموافقة على المقترح استخدم معرّفه وقيمته المحفوظة دون تحويله لطلب سورة أخرى.",
+      };
+    }
     invalidateQuranSearch(state);
     // A new named request replaces the earlier thematic candidate even when
     // that named recording is unavailable. A later "yes" cannot revive it.
@@ -840,11 +940,11 @@ export function executeLiveTool(
       proposal.intent !== parsed.data.intent ||
       (requestedId !== null && requestedId !== proposal.recitationId)
     ) {
-      delete state.proposal;
       return {
         status: "clarify",
+        recommendation: sessionRecitationMemory(state),
         message:
-          "لا يوجد مقترح صالح مؤكَّد لهذا السياق. لا تشغّل تلاوة. افهم أحدث كلام المستخدم، واسترجع مقترحًا مناسبًا فقط إذا أراد ذلك ثم اشرح الصلة وانتظر موافقته.",
+          "لم تُشغّل تلاوة ولم تُمحَ الذاكرة. استخدم بيانات المقترح المحفوظة لتصحيح المعرّف أو الموضوع؛ لا تبحث عن سورة بديلة. إن تغير سياق المستخدم فعلًا فاستخدم dismiss_recitation_proposal. المقترح المنتهي لا يجيز التشغيل.",
       };
     }
     // The model cannot replace a held candidate during confirmation.
@@ -898,6 +998,15 @@ export function executeLiveTool(
       message: "سبق تشغيل هذا النطاق؛ تابع الحوار دون إعادة التلاوة.",
     };
   }
+  rememberProposal(state, "playback_requested");
+  if (parsed.data.intent === "explicit_request")
+    state.lastRecommendation = {
+      proposalId: null,
+      recitation: result.recitation,
+      intent: "explicit_request",
+      userConcern: "طلب المستخدم تسجيلًا محددًا",
+      state: "playback_requested",
+    };
   delete state.proposal;
   delete state.searchSnapshot;
   state.proactiveSuppressed = false;
@@ -999,6 +1108,7 @@ export async function handleLiveSession(
     const pending = new Map<string, PendingCall[]>();
     const searchingResponses = new Set<string>();
     const currentResponses = new Map<string, string>();
+    const activeDelegations = new Set<string>();
     const responseRevisions = new Map<string, number>();
     const delegationRevisions = new Map<string, number>();
     const continuationRevisions = new Map<string, number>();
@@ -1009,6 +1119,7 @@ export async function handleLiveSession(
       recentIds: [],
       urgent: false,
       inputRevision: 0,
+      sessionExpiresAt: expiresAt,
       requireGroundedSelection: true,
       inputFragments,
     };
@@ -1044,9 +1155,26 @@ export async function handleLiveSession(
       },
       send: (event) => sendLive(socket, event),
     });
+    const progress = new ConversationProgressController({
+      isEligible: () =>
+        !closing &&
+        !streamClosed &&
+        !state.closed &&
+        !state.urgent &&
+        !state.supportRequired &&
+        !state.proactiveSuppressed &&
+        !state.proposal &&
+        !state.lastRecommendation &&
+        !state.searchSnapshot &&
+        activeDelegations.size === 0 &&
+        searchingResponses.size === 0 &&
+        pending.size === 0,
+      send: (event) => sendLive(socket, event),
+    });
     const cleanup = () => {
       state.closed = true;
       proposalDelivery.close();
+      progress.close();
       clearTimeout(deadline);
       clearTimeout(warn);
       clearInterval(heartbeat);
@@ -1054,6 +1182,7 @@ export async function handleLiveSession(
       pending.clear();
       searchingResponses.clear();
       currentResponses.clear();
+      activeDelegations.clear();
       responseRevisions.clear();
       delegationRevisions.clear();
       continuationRevisions.clear();
@@ -1063,6 +1192,7 @@ export async function handleLiveSession(
       seenCalls.clear();
       state.recentIds.length = 0;
       delete state.proposal;
+      delete state.lastRecommendation;
       delete state.searchSnapshot;
       socket.removeAllListeners("message");
       socket.close();
@@ -1121,7 +1251,11 @@ export async function handleLiveSession(
         return;
       }
       const type = event.type;
-      if (proposalDelivery.consumeProviderEvent(event)) return;
+      if (
+        proposalDelivery.consumeProviderEvent(event) ||
+        progress.consumeProviderEvent(event)
+      )
+        return;
       if (type === "session.closed") {
         finalized = true;
         emit({ type: "audio_reset", reason: "closed" });
@@ -1171,6 +1305,7 @@ export async function handleLiveSession(
           return;
         if (type === "session.input_transcript.delta" && event.delta.trim()) {
           proposalDelivery.observeCallerTranscript(event.delta);
+          progress.observeCallerTranscript(event.delta);
           inputRevision++;
           state.inputRevision = inputRevision;
           continuationsWithoutInput = 0;
@@ -1184,6 +1319,7 @@ export async function handleLiveSession(
           }
         } else {
           proposalDelivery.observeAssistantTranscript(event.delta);
+          progress.observeAssistantTranscript(event.delta);
         }
         emit({
           type: "transcript",
@@ -1213,6 +1349,8 @@ export async function handleLiveSession(
         typeof event.delegation?.id === "string"
       ) {
         delegationRevisions.set(event.delegation.id, inputRevision);
+        activeDelegations.add(event.delegation.id);
+        progress.backendStarted();
       } else if (type === "response.event") {
         const nested = event.event;
         if (!nested) return;
@@ -1230,6 +1368,7 @@ export async function handleLiveSession(
             responseRevisions.delete(previous);
           }
           currentResponses.set(delegationId, nested.response.id);
+          activeDelegations.add(delegationId);
           responseRevisions.set(
             nested.response.id,
             continuationRevisions.get(delegationId) ??
@@ -1273,6 +1412,7 @@ export async function handleLiveSession(
             return;
           const calls = pending.get(responseId);
           if (!calls?.length) {
+            activeDelegations.delete(delegationId);
             proposalDelivery.backendCompleted(delegationId, responseId);
             return;
           }
@@ -1294,8 +1434,8 @@ export async function handleLiveSession(
                 },
               });
             }
-            delete state.proposal;
             currentResponses.delete(delegationId);
+            activeDelegations.delete(delegationId);
             responseRevisions.delete(responseId);
             continuationRevisions.delete(delegationId);
             sendLive(socket, {
@@ -1358,11 +1498,8 @@ export async function handleLiveSession(
                     },
                     proposal: state.proposal
                       ? {
+                          ...sessionRecitationMemory(state),
                           id: state.proposal.id,
-                          recitationId: state.proposal.recitationId,
-                          intent: state.proposal.intent,
-                          userConcern: state.proposal.userConcern,
-                          expiresAt: state.proposal.expiresAt,
                         }
                       : null,
                     message:
@@ -1433,6 +1570,21 @@ export async function handleLiveSession(
               result && typeof result === "object" && "status" in result
                 ? result.status
                 : undefined;
+            progress.revalidate();
+            if (
+              status === "proposed" ||
+              status === "remembered" ||
+              status === "awaiting_consent"
+            ) {
+              const memory = sessionRecitationMemory(state);
+              if (memory)
+                sendLive(socket, {
+                  type: "session.thinking.append",
+                  event_id: randomUUID(),
+                  delegation_id: null,
+                  content: `حقيقة محفوظة من التطبيق: التسجيل هو ${memory.title}، مرجعه ${memory.reference}، وحالته ${memory.state}. هذا هو الاسم المعتمد عند السؤال عنه؛ لا تستبدله أو توسّع نطاقه. سؤال الاسم لا يشغّله. لا تنطق نص القرآن.`,
+                });
+            }
             if (
               call.name === "prepare_relevant_recitation" &&
               status === "proposed"
@@ -1472,17 +1624,18 @@ export async function handleLiveSession(
           }
           if (stale.length && !canRevalidate) {
             // No third automatic revalidation. Keep the voice conversation live,
-            // but abandon this candidate and the outdated backend continuation.
-            delete state.proposal;
+            // but abandon the outdated continuation. A remembered source remains
+            // identifiable; only a new validated decision can authorize playback.
             continuationRevisions.delete(delegationId);
             responseRevisions.delete(responseId);
             currentResponses.delete(delegationId);
+            activeDelegations.delete(delegationId);
             sendLive(socket, {
               type: "session.thinking.append",
               event_id: randomUUID(),
               delegation_id: null,
               content:
-                "لم تُشغّل أي تلاوة وأُلغي المقترح لأن الكلام استمر في التغير أثناء التحقق. تابع الإنصات إلى أحدث ما يقوله المستخدم. لا تعلن نجاح التشغيل ولا تكرر محاولة قديمة؛ إذا أراد تلاوة لاحقًا فابدأ من رغبته الواضحة الجديدة.",
+                "لم تُشغّل أي تلاوة لأن الكلام استمر في التغير أثناء التحقق. تابع الإنصات إلى أحدث كلامه. اسم المقترح محفوظ عبر get_session_recitation؛ لا تغيّره بسبب انقطاع التحقق ولا تعلن نجاح التشغيل. يلزم قرار جديد كامل وموافقة واضحة قبل أي تشغيل.",
             });
           } else {
             continuationsWithoutInput++;
@@ -1495,8 +1648,15 @@ export async function handleLiveSession(
           nested.type === "response.failed" ||
           nested.type === "response.incomplete"
         ) {
-          proposalDelivery.backendFailed(delegationId);
           const responseId = nested.response?.id;
+          if (
+            typeof responseId === "string" &&
+            currentResponses.has(delegationId) &&
+            currentResponses.get(delegationId) !== responseId
+          )
+            return;
+          proposalDelivery.backendFailed(delegationId);
+          activeDelegations.delete(delegationId);
           if (typeof responseId === "string") {
             if (searchingResponses.has(responseId))
               invalidateQuranSearch(state);
