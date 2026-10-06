@@ -342,6 +342,72 @@ async function progressJourney(provider = new FakeProvider()) {
   };
 }
 
+// Synthetic compatibility envelopes exercise ownership invariants. They do not
+// claim which shape a particular live provider deployment emits.
+const manualEnvelopeShapes = ["null", "absent", "completed-owner"] as const;
+type ManualEnvelopeShape = (typeof manualEnvelopeShapes)[number];
+const completedOwner = "completed-native-owner";
+
+async function completedOwnerJourney() {
+  const journey = await progressJourney();
+  journey.provider.receive({
+    type: "session.delegation.created",
+    delegation: { id: completedOwner },
+  });
+  nested(journey.provider, completedOwner, {
+    type: "response.created",
+    response: { id: "completed-native-response" },
+  });
+  nested(journey.provider, completedOwner, {
+    type: "response.completed",
+    response: { id: "completed-native-response" },
+  });
+  return journey;
+}
+
+function shapedManualResponse(
+  provider: FakeProvider,
+  shape: ManualEnvelopeShape,
+  event: unknown,
+) {
+  provider.receive({
+    type: "response.event",
+    ...(shape === "absent"
+      ? {}
+      : { delegation_id: shape === "null" ? null : completedOwner }),
+    event,
+  });
+}
+
+function shapedManualSearch(
+  provider: FakeProvider,
+  shape: ManualEnvelopeShape,
+  responseId: string,
+) {
+  shapedManualResponse(provider, shape, {
+    type: "response.created",
+    response: { id: responseId },
+  });
+  shapedManualResponse(provider, shape, {
+    type: "response.output_item.done",
+    item: {
+      type: "function_call",
+      call_id: responseId,
+      name: "search_quran",
+      arguments: JSON.stringify({
+        query: "ضغط العمل وكثرة المسؤوليات",
+        concepts: ["حدود الطاقة البشرية", "التيسير ورفع الحرج"],
+        references: ["94:5-6"],
+        safety: "ordinary",
+      }),
+    },
+  });
+  shapedManualResponse(provider, shape, {
+    type: "response.completed",
+    response: { id: responseId },
+  });
+}
+
 async function closeJourney(
   provider: FakeProvider,
   response: Response,
@@ -1527,6 +1593,412 @@ test("a synchronous partial kickoff send failure cannot authorize manual tools o
         streamed,
         /"type":"(?:error|recitation)"|"reason":"provider_error"/,
       );
+    }
+  }
+});
+
+test("a native empathy-only reply resumes the one-time backend watchdog without requiring new caller input", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  const provider = new FakeProvider();
+  const response = await handleLiveSession(
+    request(),
+    dependencies(provider, { durationSeconds: 240 }),
+  );
+  const output = response.text();
+  const kickoffs = () =>
+    provider.sent.filter(
+      (event) =>
+        event.type === "response.item.create" &&
+        event.item?.role === "developer" &&
+        event.item?.content === CONVERSATION_PROGRESS_INSTRUCTION,
+    );
+  try {
+    provider.receive({
+      type: "session.input_transcript.delta",
+      delta: "تتراكم مسؤوليات العمل ولا أجد وقتًا للراحة بعد كل هذا الضغط",
+    });
+    provider.receive({
+      type: "session.delegation.created",
+      delegation: { id: "native-empathy" },
+    });
+    nested(provider, "native-empathy", {
+      type: "response.created",
+      response: { id: "empathy-only-response" },
+    });
+    t.mock.timers.tick(1_000);
+    provider.receive({
+      type: "session.output_transcript.delta",
+      delta:
+        "أفهم أنك تواجه ضغطًا متواصلًا من مسؤوليات العمل وأنك تحتاج إلى مساحة من الراحة والإنصات الهادئ لما تمر به في هذه الفترة.",
+    });
+    t.mock.timers.tick(3_000);
+    assert.equal(kickoffs().length, 0);
+    nested(provider, "native-empathy", {
+      type: "response.completed",
+      response: { id: "empathy-only-response" },
+    });
+    t.mock.timers.tick(6_999);
+    assert.equal(
+      kickoffs().length,
+      0,
+      "completion preserves the original assistant-start deadline",
+    );
+    t.mock.timers.tick(1);
+    assert.equal(
+      kickoffs().length,
+      1,
+      "a completed empathy-only delegation must not strand the initial grounded lookup",
+    );
+    assert.equal(
+      provider.sent.filter((event) => event.type === "response.create").length,
+      1,
+    );
+    const callerContext = provider.sent.find(
+      (event) =>
+        event.type === "response.item.create" && event.item?.role === "user",
+    );
+    assert.ok(callerContext);
+    assert.equal(JSON.parse(callerContext.item.content).snapshotRevision, 1);
+    t.mock.timers.tick(10_000);
+    assert.equal(kickoffs().length, 1);
+    assert.equal(
+      provider.sent.filter((event) => event.type === "response.create").length,
+      1,
+    );
+  } finally {
+    provider.receive({ type: "session.closed", reason: "close_requested" });
+  }
+  assert.doesNotMatch(await output, /"type":"recitation"/);
+});
+
+test("a sourced native proposal prevents a watchdog kickoff after its final reply completes", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  const provider = new FakeProvider();
+  const response = await handleLiveSession(
+    request(),
+    dependencies(provider, { durationSeconds: 240 }),
+  );
+  const output = response.text();
+  const kickoffs = () =>
+    provider.sent.filter(
+      (event) =>
+        event.type === "response.item.create" &&
+        event.item?.role === "developer" &&
+        event.item?.content === CONVERSATION_PROGRESS_INSTRUCTION,
+    );
+  try {
+    provider.receive({
+      type: "session.input_transcript.delta",
+      delta: "تتراكم مسؤوليات العمل ولا أجد وقتًا للراحة بعد كل هذا الضغط",
+    });
+    provider.receive({
+      type: "session.delegation.created",
+      delegation: { id: "native-grounded" },
+    });
+    nested(provider, "native-grounded", {
+      type: "response.created",
+      response: { id: "native-grounded-search" },
+    });
+    provider.receive({
+      type: "session.output_transcript.delta",
+      delta:
+        "أفهم أنك تواجه ضغطًا متواصلًا من مسؤوليات العمل وأنك تحتاج إلى مساحة من الراحة والإنصات الهادئ لما تمر به في هذه الفترة.",
+    });
+    completeTool(
+      provider,
+      "native-grounded",
+      "native-grounded-search",
+      "search_quran",
+      {
+        query: "ضغط العمل وكثرة المسؤوليات",
+        concepts: ["حدود الطاقة البشرية", "التيسير ورفع الحرج"],
+        references: ["94:5-6"],
+        safety: "ordinary",
+      },
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const searched = toolResult(provider, "native-grounded-search");
+    assert.equal(searched.status, "candidates");
+    completeTool(
+      provider,
+      "native-grounded",
+      "native-grounded-prepare",
+      "prepare_relevant_recitation",
+      {
+        intent: "overwhelmed",
+        fit: "supported",
+        safety: "ordinary",
+        userConcern:
+          "تتراكم مسؤوليات العمل ولا أجد وقتًا للراحة بعد كل هذا الضغط",
+        searchId: searched.searchId,
+        candidateId: candidate.id,
+        connection:
+          "معنى اليسر بعد العسر يتصل مباشرة بشعوره أن ضغط المسؤوليات يطول",
+      },
+    );
+    await Promise.resolve();
+    assert.equal(
+      toolResult(provider, "native-grounded-prepare").status,
+      "proposed",
+    );
+    completeNativeReply(
+      provider,
+      "native-grounded",
+      "أقترح مقطعًا من سورة الشرح، هل نبدأ الاستماع؟",
+      "native-grounded-final",
+    );
+    const requestsBefore = provider.sent.filter(
+      (event) => event.type === "response.create",
+    ).length;
+    t.mock.timers.tick(20_000);
+    assert.equal(
+      kickoffs().length,
+      0,
+      "the accepted proposal already satisfies the grounded lookup",
+    );
+    assert.equal(
+      provider.sent.filter((event) => event.type === "response.create").length,
+      requestsBefore,
+    );
+    assert.equal(
+      commentary(provider).length,
+      0,
+      "the native sourced offer also prevents duplicate spoken invitations",
+    );
+  } finally {
+    provider.receive({ type: "session.closed", reason: "close_requested" });
+  }
+  assert.doesNotMatch(await output, /"type":"recitation"/);
+});
+
+test("each supported manual envelope executes one lookup after the captured native owner has completed", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  for (const shape of manualEnvelopeShapes) {
+    const journey = await completedOwnerJourney();
+    try {
+      t.mock.timers.tick(10_000);
+      assert.equal(journey.requestCount(), 1, shape);
+      shapedManualSearch(journey.provider, shape, `accepted-manual-${shape}`);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      assert.equal(
+        toolResult(journey.provider, `accepted-manual-${shape}`).status,
+        "candidates",
+        shape,
+      );
+      assert.equal(journey.sourceLookups(), 1, shape);
+      assert.equal(
+        journey.requestCount(),
+        2,
+        "one kickoff plus one successful lookup continuation",
+      );
+      shapedManualSearch(journey.provider, shape, `accepted-manual-${shape}`);
+      await Promise.resolve();
+      assert.equal(
+        journey.sourceLookups(),
+        1,
+        "duplicate provider delivery cannot rerun the source lookup",
+      );
+      assert.equal(journey.requestCount(), 2, shape);
+    } finally {
+      assert.doesNotMatch(await journey.close(), /"type":"recitation"/);
+    }
+  }
+});
+
+test("each manual envelope revalidates changed input once then preserves the fresh revision through search and preparation", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  for (const shape of manualEnvelopeShapes) {
+    const journey = await completedOwnerJourney();
+    try {
+      t.mock.timers.tick(10_000);
+      journey.provider.receive({
+        type: "session.input_transcript.delta",
+        delta:
+          " وأوضح أن ما يرهقني هو تراكم مسؤوليات العمل اليومية دون وقت للراحة.",
+      });
+      shapedManualSearch(journey.provider, shape, `stale-manual-${shape}`);
+      await Promise.resolve();
+      await Promise.resolve();
+      const result = toolResult(journey.provider, `stale-manual-${shape}`);
+      assert.equal(result.status, "context_updated", shape);
+      assert.equal(result.actionExecuted, false, shape);
+      assert.equal(result.snapshotRevision, 2, shape);
+      assert.match(
+        result.userSpeech.newFragments,
+        /تراكم مسؤوليات العمل اليومية/,
+      );
+      assert.equal(journey.sourceLookups(), 0, shape);
+      shapedManualSearch(journey.provider, shape, `fresh-manual-${shape}`);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      const fresh = toolResult(journey.provider, `fresh-manual-${shape}`);
+      assert.equal(fresh.status, "candidates", shape);
+      assert.equal(journey.sourceLookups(), 1, shape);
+      const preparationId = `fresh-preparation-${shape}`;
+      shapedManualResponse(journey.provider, shape, {
+        type: "response.created",
+        response: { id: preparationId },
+      });
+      shapedManualResponse(journey.provider, shape, {
+        type: "response.output_item.done",
+        item: {
+          type: "function_call",
+          call_id: preparationId,
+          name: "prepare_relevant_recitation",
+          arguments: JSON.stringify({
+            intent: "overwhelmed",
+            fit: "supported",
+            safety: "ordinary",
+            userConcern: "تراكم مسؤوليات العمل اليومية دون وقت للراحة",
+            searchId: fresh.searchId,
+            candidateId: candidate.id,
+            connection:
+              "معنى اليسر بعد العسر يتصل مباشرة بشعوره أن ضغط المسؤوليات يطول",
+          }),
+        },
+      });
+      shapedManualResponse(journey.provider, shape, {
+        type: "response.completed",
+        response: { id: preparationId },
+      });
+      await Promise.resolve();
+      const prepared = toolResult(journey.provider, preparationId);
+      assert.equal(
+        prepared.status,
+        "proposed",
+        "preparation inherits the revalidated search revision rather than the original dispatch revision",
+      );
+      assert.equal(prepared.recitationId, recitation.id);
+      assert.equal(journey.sourceLookups(), 1);
+      const revalidations = journey.provider.sent
+        .filter(
+          (event) =>
+            event.type === "response.item.create" &&
+            event.item?.type === "function_call_output",
+        )
+        .map((event) => JSON.parse(event.item.output))
+        .filter((result) => result.status === "context_updated");
+      assert.equal(
+        revalidations.length,
+        1,
+        "a stable later tool chain cannot repeatedly fall back to the obsolete revision",
+      );
+    } finally {
+      assert.doesNotMatch(await journey.close(), /"type":"recitation"/);
+    }
+  }
+});
+
+test("a newer native delegation supersedes manual tools carrying the captured completed owner", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  const journey = await completedOwnerJourney();
+  const { provider } = journey;
+  try {
+    t.mock.timers.tick(10_000);
+    provider.receive({
+      type: "session.input_transcript.delta",
+      delta: " لا أريد تلاوة الآن، فقط أريد أن أكمل حديثي.",
+    });
+    provider.receive({
+      type: "session.delegation.created",
+      delegation: { id: "new-native-owner" },
+    });
+    nested(provider, "new-native-owner", {
+      type: "response.created",
+      response: { id: "new-native-response" },
+    });
+    const beforeManual = journey.requestCount();
+    shapedManualSearch(provider, "completed-owner", "old-owner-manual");
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(
+      toolResult(provider, "old-owner-manual").status,
+      "input_required",
+    );
+    assert.equal(journey.sourceLookups(), 0);
+    assert.equal(
+      journey.requestCount(),
+      beforeManual,
+      "the superseded owner cannot restart its backend chain",
+    );
+    completeTool(
+      provider,
+      "new-native-owner",
+      "new-native-response",
+      "dismiss_recitation_proposal",
+      { reason: "declined" },
+    );
+    await Promise.resolve();
+    assert.equal(
+      toolResult(provider, "new-native-response").status,
+      "dismissed",
+    );
+    assert.equal(journey.sourceLookups(), 0);
+    assert.equal(journey.requestCount(), beforeManual + 1);
+  } finally {
+    assert.doesNotMatch(await journey.close(), /"type":"recitation"/);
+  }
+});
+
+test("failed or incomplete manual responses cannot execute further tools under any supported envelope", async (t) => {
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: 1_800_000_000_000,
+  });
+  for (const shape of manualEnvelopeShapes) {
+    for (const terminal of ["response.failed", "response.incomplete"]) {
+      const journey = await completedOwnerJourney();
+      try {
+        t.mock.timers.tick(10_000);
+        shapedManualResponse(journey.provider, shape, {
+          type: "response.created",
+          response: { id: "failed-manual-response" },
+        });
+        shapedManualResponse(journey.provider, shape, {
+          type: terminal,
+          response: { id: "failed-manual-response" },
+        });
+        const beforeLateTools = journey.requestCount();
+        shapedManualSearch(journey.provider, shape, `late-after-${terminal}`);
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(
+          toolResult(journey.provider, `late-after-${terminal}`).status,
+          "input_required",
+          `${shape}: ${terminal}`,
+        );
+        assert.equal(journey.sourceLookups(), 0, `${shape}: ${terminal}`);
+        assert.equal(
+          journey.requestCount(),
+          beforeLateTools,
+          "failed manual requests never create another continuation",
+        );
+        t.mock.timers.tick(10_000);
+        assert.equal(journey.sourceLookups(), 0);
+        assert.equal(journey.requestCount(), beforeLateTools);
+      } finally {
+        assert.doesNotMatch(await journey.close(), /"type":"recitation"/);
+      }
     }
   }
 });

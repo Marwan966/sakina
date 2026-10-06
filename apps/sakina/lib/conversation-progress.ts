@@ -37,6 +37,7 @@ export class ConversationProgressController {
   private lastCallerAt?: number;
   private assistantStartedAt?: number;
   private timer?: TimerHandle;
+  private backendPaused = false;
   private steered = false;
   private closed = false;
 
@@ -48,7 +49,7 @@ export class ConversationProgressController {
 
   observeCallerTranscript(delta: string) {
     if (this.closed || this.steered || !/[\p{L}\p{N}]/u.test(delta)) return;
-    if (!this.isEligible()) {
+    if (!this.backendPaused && !this.isEligible()) {
       this.resetAttempt();
       return;
     }
@@ -66,7 +67,7 @@ export class ConversationProgressController {
 
   observeAssistantTranscript(delta: string) {
     if (this.closed || this.steered) return;
-    if (!this.isEligible()) {
+    if (!this.backendPaused && !this.isEligible()) {
       this.resetAttempt();
       return;
     }
@@ -80,13 +81,27 @@ export class ConversationProgressController {
     this.schedule();
   }
 
-  /** Native delegation wins; later caller input may start a fresh attempt. */
+  /** Native delegation gets priority without losing the caller's context. */
   backendStarted() {
-    this.resetAttempt();
+    if (this.closed || this.steered) return;
+    this.backendPaused = true;
+    this.cancelTimer();
+  }
+
+  /** Resume only when the session reports native completion without tools. */
+  backendFinished() {
+    if (this.closed || this.steered) return;
+    this.backendPaused = false;
+    this.revalidate();
   }
 
   revalidate() {
-    if (this.closed || this.steered || !this.isEligible()) {
+    if (this.closed || this.steered) {
+      this.resetAttempt();
+      return;
+    }
+    if (this.backendPaused) return;
+    if (!this.isEligible()) {
       this.resetAttempt();
       return;
     }
@@ -95,6 +110,7 @@ export class ConversationProgressController {
 
   close() {
     this.closed = true;
+    this.backendPaused = false;
     this.resetAttempt();
   }
 
@@ -125,6 +141,7 @@ export class ConversationProgressController {
     if (
       this.closed ||
       this.steered ||
+      this.backendPaused ||
       this.callerLetters < MIN_CALLER_LETTERS ||
       this.assistantLetters < MIN_ASSISTANT_LETTERS ||
       this.lastCallerAt === undefined ||
@@ -146,6 +163,7 @@ export class ConversationProgressController {
   }
 
   private steerIfNeeded() {
+    if (this.backendPaused) return;
     if (this.closed || this.steered || !this.isEligible()) {
       this.resetAttempt();
       return;

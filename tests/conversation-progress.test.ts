@@ -142,21 +142,87 @@ test("never steers during recent caller input even if the assistant is still tal
   assert.equal(backendCalls.count, 0);
 });
 
-test("native backend work cancels an attempt without using the lifetime reminder", () => {
-  const { controller, clock, backendCalls } = setup();
+test("native backend work pauses the timer and no-tool completion retains caller evidence", () => {
+  const { controller, clock, backendCalls, setEligible } = setup();
   controller.observeCallerTranscript(concern);
   controller.observeAssistantTranscript(response);
   clock.advance(9_000);
+  const staleCallback = [...clock.timers.values()][0].callback;
   controller.backendStarted();
+  setEligible(false);
   controller.observeAssistantTranscript(response);
+  controller.revalidate();
+  staleCallback();
   clock.advance(20_000);
   assert.equal(backendCalls.count, 0);
   assert.equal(clock.timers.size, 0);
 
+  setEligible(true);
+  controller.backendFinished();
+  clock.advance(0);
+  assert.equal(backendCalls.count, 1);
+  controller.backendFinished();
+  clock.advance(60_000);
+  assert.equal(backendCalls.count, 1);
+});
+
+test("caller and assistant evidence arriving during native work survives its eligibility pause", () => {
+  const { controller, clock, backendCalls, setEligible } = setup();
+  controller.backendStarted();
+  setEligible(false);
   controller.observeCallerTranscript(concern);
+  controller.observeAssistantTranscript(response);
+  clock.advance(2_000);
+  setEligible(true);
+  controller.backendFinished();
+  clock.advance(7_999);
+  assert.equal(backendCalls.count, 0);
+  clock.advance(1);
+  assert.equal(backendCalls.count, 1);
+});
+
+test("caller interruption during native work requires a new assistant response", () => {
+  const { controller, clock, backendCalls, setEligible } = setup();
+  controller.observeCallerTranscript(concern);
+  controller.observeAssistantTranscript(response);
+  controller.backendStarted();
+  setEligible(false);
+  clock.advance(9_000);
+  controller.observeCallerTranscript("انتظر، لدي تفاصيل أخرى");
+  setEligible(true);
+  controller.backendFinished();
+  clock.advance(60_000);
+  assert.equal(backendCalls.count, 0);
   controller.observeAssistantTranscript(response);
   clock.advance(10_000);
   assert.equal(backendCalls.count, 1);
+});
+
+test("native results that remain ineligible discard retained evidence on completion", () => {
+  const { controller, clock, backendCalls, setEligible } = setup();
+  controller.observeCallerTranscript(concern);
+  controller.observeAssistantTranscript(response);
+  controller.backendStarted();
+  setEligible(false);
+  clock.advance(20_000);
+  controller.backendFinished();
+  setEligible(true);
+  controller.revalidate();
+  clock.advance(20_000);
+  assert.equal(backendCalls.count, 0);
+  assert.equal(clock.timers.size, 0);
+});
+
+test("closing a native pause cannot resume a retained attempt", () => {
+  const { controller, clock, backendCalls } = setup();
+  controller.observeCallerTranscript(concern);
+  controller.observeAssistantTranscript(response);
+  controller.backendStarted();
+  controller.close();
+  controller.backendFinished();
+  clock.advance(20_000);
+  assert.equal(backendCalls.count, 0);
+  assert.equal(clock.timers.size, 0);
 });
 
 test("eligibility changes cancel scheduled steering and discard stale evidence", () => {

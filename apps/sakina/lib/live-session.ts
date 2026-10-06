@@ -1118,9 +1118,13 @@ export async function handleLiveSession(
     const revalidationCounts = new Map<string, number>();
     const inputFragments: { revision: number; text: string }[] = [];
     let inputCharacters = 0;
+    let nativeEpoch = 0;
+    let completedBackendOwner:
+      { delegationId: string; epoch: number } | undefined;
     let progressRequest:
       | {
           revision: number;
+          ownerDelegationId?: string;
           status: "pending" | "running" | "completed" | "failed" | "superseded";
           responseIds: Set<string>;
           eventIds: Map<string, "instruction" | "context" | "create">;
@@ -1129,9 +1133,11 @@ export async function handleLiveSession(
     const abandonProgressRequest = (status: "failed" | "superseded") => {
       if (!progressRequest) return;
       progressRequest.status = status;
-      activeDelegations.delete("session");
+      activeDelegations.delete("progress-recovery");
       for (const id of progressRequest.responseIds) {
         if (searchingResponses.has(id)) invalidateQuranSearch(state);
+        for (const [owner, current] of currentResponses)
+          if (current === id) activeDelegations.delete(owner);
       }
     };
     const state: VoiceToolState = {
@@ -1185,6 +1191,7 @@ export async function handleLiveSession(
         !state.proposal &&
         !state.lastRecommendation &&
         !state.searchSnapshot &&
+        !state.searchGeneration &&
         activeDelegations.size === 0 &&
         searchingResponses.size === 0 &&
         pending.size === 0,
@@ -1195,11 +1202,16 @@ export async function handleLiveSession(
         // take the same stale-result path as any native delegation.
         progressRequest = {
           revision: inputRevision,
+          ownerDelegationId:
+            completedBackendOwner?.epoch === nativeEpoch
+              ? completedBackendOwner.delegationId
+              : undefined,
           status: "pending",
           responseIds: new Set(),
           eventIds: new Map(),
         };
-        activeDelegations.add("session");
+        completedBackendOwner = undefined;
+        activeDelegations.add("progress-recovery");
         const events = [
           {
             type: "response.item.create",
@@ -1252,6 +1264,7 @@ export async function handleLiveSession(
       continuationRevisions.clear();
       revalidationCounts.clear();
       progressRequest = undefined;
+      completedBackendOwner = undefined;
       inputFragments.length = 0;
       inputCharacters = 0;
       seenCalls.clear();
@@ -1420,6 +1433,8 @@ export async function handleLiveSession(
         type === "session.delegation.created" &&
         typeof event.delegation?.id === "string"
       ) {
+        nativeEpoch++;
+        completedBackendOwner = undefined;
         if (
           progressRequest?.status === "pending" ||
           progressRequest?.status === "running"
@@ -1437,7 +1452,12 @@ export async function handleLiveSession(
             : "session";
         if (nested.type === "response.created") {
           if (typeof nested.response?.id !== "string") return;
-          const manual = delegationId === "session" && progressRequest;
+          const manual =
+            progressRequest &&
+            (delegationId === "session" ||
+              delegationId === progressRequest.ownerDelegationId)
+              ? progressRequest
+              : undefined;
           if (
             !manual &&
             (progressRequest?.status === "pending" ||
@@ -1445,6 +1465,7 @@ export async function handleLiveSession(
           )
             abandonProgressRequest("superseded");
           if (manual) {
+            activeDelegations.delete("progress-recovery");
             manual.responseIds.add(nested.response.id);
             if (manual.status === "pending") manual.status = "running";
           }
@@ -1501,8 +1522,7 @@ export async function handleLiveSession(
             return;
           const calls = pending.get(responseId);
           const invalidProgressResponse =
-            delegationId === "session" &&
-            progressRequest &&
+            progressRequest?.responseIds.has(responseId) &&
             !["pending", "running"].includes(progressRequest.status);
           if (invalidProgressResponse) {
             // Native work wins a race with optional recovery. Satisfy pending
@@ -1527,10 +1547,19 @@ export async function handleLiveSession(
             return;
           }
           if (!calls?.length) {
-            if (delegationId === "session" && progressRequest)
+            if (progressRequest?.responseIds.has(responseId))
               progressRequest.status = "completed";
             activeDelegations.delete(delegationId);
             proposalDelivery.backendCompleted(delegationId, responseId);
+            if (
+              activeDelegations.size === 0 &&
+              searchingResponses.size === 0 &&
+              pending.size === 0
+            ) {
+              if (!progressRequest?.responseIds.has(responseId))
+                completedBackendOwner = { delegationId, epoch: nativeEpoch };
+              progress.backendFinished();
+            }
             return;
           }
           pending.delete(responseId);
@@ -1595,8 +1624,7 @@ export async function handleLiveSession(
           }
           for (const call of calls) {
             const progressAbandoned =
-              delegationId === "session" &&
-              progressRequest &&
+              progressRequest?.responseIds.has(responseId) &&
               !["pending", "running"].includes(progressRequest.status);
             let result = progressAbandoned
               ? { status: "input_required", actionExecuted: false }
@@ -1746,8 +1774,7 @@ export async function handleLiveSession(
             });
           }
           if (
-            delegationId === "session" &&
-            progressRequest &&
+            progressRequest?.responseIds.has(responseId) &&
             !["pending", "running"].includes(progressRequest.status)
           ) {
             // A native task or rejection can arrive while a search awaits I/O.
@@ -1772,6 +1799,13 @@ export async function handleLiveSession(
             });
           } else {
             continuationsWithoutInput++;
+            // Keep the latest validated snapshot across every tool hop, not
+            // just the first response after a stale-input correction.
+            if (!continuationRevisions.has(delegationId))
+              continuationRevisions.set(
+                delegationId,
+                responseRevisions.get(responseId) ?? inputRevision,
+              );
             sendLive(socket, {
               type: "response.create",
               event_id: randomUUID(),
@@ -1783,8 +1817,7 @@ export async function handleLiveSession(
         ) {
           const responseId = nested.response?.id;
           if (
-            delegationId === "session" &&
-            progressRequest &&
+            progressRequest?.responseIds.has(responseId) &&
             !["pending", "running"].includes(progressRequest.status)
           )
             return;
@@ -1795,6 +1828,8 @@ export async function handleLiveSession(
           )
             return;
           proposalDelivery.backendFailed(delegationId);
+          if (progressRequest?.responseIds.has(responseId))
+            abandonProgressRequest("failed");
           activeDelegations.delete(delegationId);
           if (typeof responseId === "string") {
             if (searchingResponses.has(responseId))
@@ -1804,6 +1839,12 @@ export async function handleLiveSession(
             if (currentResponses.get(delegationId) === responseId)
               currentResponses.delete(delegationId);
           }
+          if (
+            activeDelegations.size === 0 &&
+            searchingResponses.size === 0 &&
+            pending.size === 0
+          )
+            progress.backendFinished();
           emit({
             type: "error",
             error: "تعذّر اختيار التلاوة الآن. يمكنك مواصلة الحديث.",
