@@ -1,0 +1,38 @@
+{
+  "name": "sakina",
+  "private": true,
+  "workspaces": [
+    "apps/sakina",
+    "packages/core"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @platform/sakina",
+    "dev:sakina": "npm run dev --workspace @platform/sakina",
+    "build": "npm run build --workspace @platform/sakina",
+    "start": "npm run start --workspace @platform/sakina",
+    "typecheck": "npm run typecheck --workspace @platform/sakina && tsc --noEmit --target es2022 --module nodenext --moduleResolution nodenext --allowImportingTsExtensions --skipLibCheck supabase/functions/quran-search/handler.ts supabase/functions/voice-budget/handler.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "test:e2e": "playwright test",
+    "quran:catalog": "tsx scripts/sync-quran-catalog.ts --verify-audio",
+    "quran:seed:generate": "tsx scripts/create-quran-seed.ts",
+    "dataset:verify": "tsx scripts/dataset.ts verify",
+    "dataset:restore": "tsx scripts/dataset.ts restore",
+    "dataset:sql": "npm run dataset:restore && npm run quran:seed:generate && tsx scripts/create-quran-embeddings.ts --seed-only",
+    "security:check": "node scripts/check-public-release.mjs"
+  },
+  "devDependencies": {
+    "zod": "4.6.5",
+    "@axe-core/playwright": "4.13.0",
+    "@playwright/test": "1.63.0",
+    "@types/node": "26.6.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "prettier": "3.9.9",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  }
+}

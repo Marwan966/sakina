@@ -1,0 +1,9 @@
+project_id = "sakina"
+
+[functions.voice-budget]
+# The handler requires a server-only credential; JWT verification is replaced by that check.
+verify_jwt = false
+
+[functions.quran-search]
+# SHA-256 credential verification occurs before database I/O.
+verify_jwt = false

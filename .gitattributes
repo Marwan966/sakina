@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.gz binary
+*.png binary
+*.svg text
+dataset/quran-simple-clean-1.1.txt -text
