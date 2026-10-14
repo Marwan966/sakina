@@ -21,7 +21,7 @@
     "security:check": "node scripts/check-public-release.mjs"
   },
   "devDependencies": {
-    "zod": "4.6.5",
+    "zod": "4.6.6",
     "@axe-core/playwright": "4.13.0",
     "@playwright/test": "1.63.0",
     "@types/node": "26.6.3",
